@@ -97,17 +97,25 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _make_all_online(query, context)
         return
 
-    # cancel_op is deliberately NOT handled here — it belongs to conversation fallbacks
-
+    # cancel_op is deliberately NOT handled here — it belongs to conversation fallback
+# ── Standalone cancel handler (fires when no conversation is active) ──
 
 async def cancel_op_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Standalone handler for cancel_op when no conversation is active."""
+    """Handle cancel button press when NO conversation is active."""
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
+    if not is_authorized(uid):
+        await query.edit_message_text("⛔ Unauthorized.")
+        return
     await cancel_user_operations(uid)
+    # Also cancel any running mode tasks for this user's accounts
+    accounts = await db.get_active_accounts(uid)
+    for acc in accounts:
+        await stop_account_mode(acc, db)
     await query.edit_message_text(
-        "✅ Operation cancelled.",
+        "✅ All operations and mode tasks stopped.\n"
+        "Accounts returned to offline state.",
         reply_markup=main_menu_kb(),
     )
 
