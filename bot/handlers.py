@@ -858,6 +858,7 @@ add_account_conv = ConversationHandler(
     persistent=False,
     per_chat=False,
     per_user=True,
+    per_message=True,          
 )
 
 # ── Join ──
@@ -882,6 +883,7 @@ join_conv = ConversationHandler(
     persistent=False,
     per_chat=False,
     per_user=True,
+    per_message=True,          
 )
 
 # ── Mode ──
@@ -900,6 +902,7 @@ mode_conv = ConversationHandler(
     persistent=False,
     per_chat=False,
     per_user=True,
+    per_message=True,          
 )
 
 # ── Reaction ──
@@ -924,6 +927,7 @@ reaction_conv = ConversationHandler(
     persistent=False,
     per_chat=False,
     per_user=True,
+    per_message=True,          
 )
 
 # ── Views ──
@@ -945,6 +949,7 @@ views_conv = ConversationHandler(
     persistent=False,
     per_chat=False,
     per_user=True,
+    per_message=True,          
 )
 
 # ── Remove ──
@@ -963,6 +968,7 @@ remove_conv = ConversationHandler(
     persistent=False,
     per_chat=False,
     per_user=True,
+    per_message=True,          
 )
 
 
