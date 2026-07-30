@@ -90,10 +90,13 @@ def main():
     app.add_handler(
         CallbackQueryHandler(
             main_menu_callback,
-            pattern="^(main_menu|add_account|total_account|all_online|cancel_op)$"
+            pattern="^(main_menu|add_account|total_account|all_online)$"
         )
     )
-
+    # Standalone cancel button handler (when no conversation is active)
+    app.add_handler(
+        CallbackQueryHandler(cancel_op_fallback, pattern="^cancel_op$")
+    )
     # Conversation handlers
     app.add_handler(add_account_conv)
     app.add_handler(join_conv)
