@@ -2,7 +2,13 @@ import re
 import random
 import math
 
+from telegram.helpers import escape_markdown
 
+
+def esc(text) -> str:
+    """Escape user-provided text for Telegram Markdown (v1)."""
+    return escape_markdown(str(text), version=1)
+    
 def parse_timing(timing_str: str) -> tuple[int, int] | None:
     """Parse timing string like 'min-1s max-8s' or '1s 8s' into (min_sec, max_sec)."""
     t = timing_str.strip().lower()
