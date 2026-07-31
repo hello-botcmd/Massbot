@@ -19,13 +19,13 @@ class Database:
             self._initialised = False
 
     async def connect(self):
-        self.client = AsyncIOMotorClient(MONGO_URI)
-        self.db = self.client[DB_NAME]
-        # Ensure indexes
-        await self.db.accounts.create_index("user_id")
-        await self.db.accounts.create_index("phone")
-        self._initialised = True
-
+    async def connect(self):
+            self.client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            self.db = self.client[DB_NAME]
+            await self.db.accounts.create_index("user_id")
+            await self.db.accounts.create_index("phone")
+            self._initialised = True  
+        
     async def close(self):
         if self.client:
             self.client.close()
