@@ -29,15 +29,31 @@ async def single_handle(update, context):
     await client.disconnect()
 
     try:
-        await db.add_account(update.effective_user.id, phone, session_str, name)
+        res = await db.add_account(update.effective_user.id, phone, session_str, name)
+    except Exception as e:
+        logger.exception("add_account DB error")
+        await status.edit_text(f"❌ DB error: {esc(e)}", reply_markup=main_menu_kb())
+        context.user_data["flow"] = None
+        return
+
+    if not res["ok"]:
+        await status.edit_text(
+            "⚠️ This session is **already added** to the server by another admin.\n"
+            "Each Telegram session can be used once.",
+            parse_mode="Markdown", reply_markup=main_menu_kb())
+        context.user_data["flow"] = None
+        return
+
+    if res.get("refreshed"):
+        await status.edit_text(
+            f"🔄 Account already existed — *refreshed & reactivated*.\n"
+            f"📱 Phone: `{esc(phone)}`\n👤 Name: {esc(name)}",
+            parse_mode="Markdown", reply_markup=main_menu_kb())
+    else:
         await status.edit_text(
             f"✅ *Account Added!*\n\n📱 Phone: `{esc(phone)}`\n"
             f"👤 Name: {esc(name)}\n🆔 ID: `{me.id}`",
             parse_mode="Markdown", reply_markup=main_menu_kb())
-    except Exception as e:
-        logger.exception("add_account DB error")
-        await status.edit_text(f"❌ DB error: {esc(e)}", reply_markup=main_menu_kb())
-
     context.user_data["flow"] = None
 
 
@@ -79,10 +95,15 @@ async def bulk_session_handle(update, context):
         name = f"{me.first_name or ''} {me.last_name or ''}".strip()
         await client.disconnect()
         try:
-            await db.add_account(uid, phone, session_str, name)
-            context.user_data["add_ok"] = context.user_data.get("add_ok", 0) + 1
-            context.user_data["add_log"].append(f"✅ #{idx} {phone}")
-            await status.edit_text(f"✅ #{idx} added: {esc(phone)}")
+            res = await db.add_account(uid, phone, session_str, name)
+            if not res["ok"]:
+                context.user_data["add_fail"] = context.user_data.get("add_fail", 0) + 1
+                context.user_data["add_log"].append(f"⚠️ #{idx} already exists")
+                await status.edit_text(f"⚠️ #{idx} already added — skipped.")
+            else:
+                context.user_data["add_ok"] = context.user_data.get("add_ok", 0) + 1
+                context.user_data["add_log"].append(f"✅ #{idx} {phone}")
+                await status.edit_text(f"✅ #{idx} added: {esc(phone)}")
         except Exception as e:
             logger.exception("bulk add DB error")
             context.user_data["add_fail"] = context.user_data.get("add_fail", 0) + 1
