@@ -9,7 +9,7 @@ from telegram.ext import (
     MessageHandler, filters,
 )
 
-from config import BOT_TOKEN, OWNER_ID, ADMIN_IDS, HEALTH_CHECK_INTERVAL
+from config import BOT_TOKEN, OWNER_ID, MONGO_URI, ADMIN_IDS, HEALTH_CHECK_INTERVAL
 from utils.database import Database
 
 logging.basicConfig(
