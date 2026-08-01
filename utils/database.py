@@ -58,6 +58,7 @@ class Database:
                     "session_string": session_string,
                     "status": "active",
                     "current_mode": 0,
+                    "last_seen_hidden": existing.get("last_seen_hidden", False),
                     "in_use": False,
                     "added_at": datetime.utcnow(),
                 }}
@@ -72,6 +73,7 @@ class Database:
             "session_string": session_string,
             "status": "active",
             "current_mode": 0,
+            "last_seen_hidden": False,
             "in_use": False,
             "added_at": datetime.utcnow(),
         }
