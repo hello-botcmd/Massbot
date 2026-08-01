@@ -4,12 +4,14 @@ import re
 
 from telethon import functions, types
 from telethon.errors import UserAlreadyParticipantError
-from telethon.tl.functions.account import UpdateStatusRequest, SetPrivacyRequest
+from telethon.tl.functions.account import (
+    UpdateStatusRequest, SetPrivacyRequest, GetPrivacyRequest,
+)
 from telethon.tl.functions.messages import SendReactionRequest, GetMessagesViewsRequest
 from telethon.tl.types import (
     InputPrivacyKeyStatusTimestamp,
-    InputPrivacyValueAllowContacts,   # hides last seen from non-contacts (Mode 3)
-    InputPrivacyValueAllowAll,        # shows last seen to everyone (Mode 1/2)
+    InputPrivacyValueAllowAll,      # last seen visible to everyone (Mode 1/2)
+    InputPrivacyValueAllowContacts, # last seen hidden from non-contacts (Mode 3)
 )
 
 from config import ONLINE_PING_INTERVAL, MODE2_ONLINE_DURATION
@@ -58,6 +60,30 @@ async def cancel_user_operations(uid: int):
     ev = _stop_events.get(uid)
     if ev:
         ev.set()
+
+
+# ── privacy helpers ──────────────────────────────────────────
+async def _set_last_seen_visible(client):
+    """Unhide last seen. Checks Teleelgram's current rules first,
+    only writes when actually hidden."""
+    try:
+        res = await client(GetPrivacyRequest(key=InputPrivacyKeyStatusTimestamp()))
+        if any(isinstance(r, InputPrivacyValueAllowAll) for r in res.rules):
+            return True
+    except Exception as e:
+        logger.warning("GetPrivacy failed (will still set AllowAll): %s", e)
+    await client(SetPrivacyRequest(
+        key=InputPrivacyKeyStatusTimestamp(),
+        rules=[InputPrivacyValueAllowAll()],
+    ))
+    return True
+
+
+async def _set_last_seen_hidden(client):
+    await client(SetPrivacyRequest(
+        key=InputPrivacyKeyStatusTimestamp(),
+        rules=[InputPrivacyValueAllowContacts()],
+    ))
 
 
 # ── online loops (mode 1 & 2) ────────────────────────────────
@@ -113,9 +139,18 @@ async def stop_account_mode(acc, db):
 
 
 async def apply_mode_to_account(acc, mode, db):
+    """Apply mode to ONE account. Handles privacy transitions explicitly.
+
+    Mode 3 (hidden) → Mode 1/2 : UNHIDE last seen first, then go online.
+    Mode 1/2 → Mode 3        : hide last seen (and loop was already stopped).
+    """
     account_id = str(acc["_id"])
     tm = TelethonManager()
-    # Always stop any running online task BEFORE switching (kills the 3→1/2 race)
+
+    # Was this account hidden? Use the persistent field, fall back to current_mode=3
+    was_hidden = bool(acc.get("last_seen_hidden") or acc.get("current_mode") == 3)
+
+    # Always kill any running online task BEFORE switching (no race left behind)
     await stop_account_mode(acc, db)
 
     if mode in (1, 2):
@@ -124,23 +159,21 @@ async def apply_mode_to_account(acc, mode, db):
             await db.update_account(account_id, {"status": "disconnected"})
             return f"❌ {esc(acc.get('phone','?'))}: session invalid"
         try:
-            # ⭐ Mode 3 → 1/2 transition: UNHIDE last seen FIRST, then go online
-            if acc.get("current_mode") == 3:
-                await client(SetPrivacyRequest(
-                    key=InputPrivacyKeyStatusTimestamp(),
-                    rules=[InputPrivacyValueAllowAll()],
-                ))
-            await client(UpdateStatusRequest(offline=False))
+            if was_hidden:
+                await _set_last_seen_visible(client)     # ⭐ unhide first
+            await client(UpdateStatusRequest(offline=False))  # then go online
         except Exception as e:
             return f"❌ {esc(acc.get('phone','?'))}: {esc(e)}"
         await db.update_account(account_id, {
             "status": "active", "current_mode": mode,
+            "last_seen_hidden": False,
             "online_task_running": True, "in_use": True,
         })
         task = asyncio.create_task(_online_loop(acc, mode, db))
         _online_tasks[account_id] = task
         label = "Always Online" if mode == 1 else "Online 2 min"
-        return f"✅ {esc(acc.get('phone','?'))}: Mode {mode} ({label})"
+        tag = " 🔓(unhidden)" if was_hidden else ""
+        return f"✅ {esc(acc.get('phone','?'))}: Mode {mode} ({label}){tag}"
 
     if mode == 3:
         client = await tm.get_fresh_client(acc["session_string"])
@@ -148,15 +181,13 @@ async def apply_mode_to_account(acc, mode, db):
             await db.update_account(account_id, {"status": "disconnected"})
             return f"❌ {esc(acc.get('phone','?'))}: session invalid"
         try:
-            await client(SetPrivacyRequest(
-                key=InputPrivacyKeyStatusTimestamp(),
-                rules=[InputPrivacyValueAllowContacts()],
-            ))
+            await _set_last_seen_hidden(client)
             await client.disconnect()
         except Exception as e:
             return f"❌ {esc(acc.get('phone','?'))}: {esc(e)}"
         await db.update_account(account_id, {
             "status": "active", "current_mode": 3,
+            "last_seen_hidden": True,
             "online_task_running": False, "in_use": False,
         })
         return f"✅ {esc(acc.get('phone','?'))}: Mode 3 (last seen hidden)"
