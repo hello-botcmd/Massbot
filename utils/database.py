@@ -26,20 +26,47 @@ class Database:
         self.client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         self.db = self.client[DB_NAME]
         await self.db.accounts.create_index("owner_uid")
+        await self.db.accounts.create_index("tg_id")
         await self.db.accounts.create_index("phone")
-
-        # Drop the legacy UNIQUE index on session_string — it caused E11000 on re-adds.
-        # (Session uniqueness is enforced in app code instead, see add_account.)
+        # Drop the legacy unique index that caused E11000 on re-adds
         try:
             await self.db.accounts.drop_index("session_string_1")
         except Exception:
             pass
         logger.info("MongoDB connected: %s", DB_NAME)
 
-    async def add_account(self, owner_uid, phone, session_string, name=""):
-        """Returns dict: {"ok": bool, "exists": bool, "refreshed": bool}."""
+    async def add_account(self, owner_uid, tg_id, phone, session_string, name=""):
+        """Dedupe by Telegram account ID.
+        Returns {"ok": bool, "refreshed": bool, "exists": bool}"""
+        # Same Telegram account already stored?
+        existing = await self.db.accounts.find_one({"tg_id": tg_id})
+        if existing is None:
+            # Legacy docs (pre-tg_id) — fall back to phone
+            existing = await self.db.accounts.find_one(
+                {"owner_uid": owner_uid, "phone": phone})
+
+        if existing:
+            if existing.get("owner_uid") != owner_uid:
+                return {"ok": False, "exists": True}   # used by another admin
+            # Same owner re-adds → refresh session + reactivate
+            await self.db.accounts.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {
+                    "tg_id": tg_id,
+                    "phone": phone,
+                    "name": name,
+                    "session_string": session_string,
+                    "status": "active",
+                    "current_mode": 0,
+                    "in_use": False,
+                    "added_at": datetime.utcnow(),
+                }}
+            )
+            return {"ok": True, "refreshed": True}
+
         doc = {
             "owner_uid": owner_uid,
+            "tg_id": tg_id,
             "phone": phone,
             "name": name,
             "session_string": session_string,
@@ -49,24 +76,9 @@ class Database:
             "added_at": datetime.utcnow(),
         }
         try:
-            await self.db.accounts.update_one(
-                {"owner_uid": owner_uid, "phone": phone},
-                {"$set": doc},
-                upsert=True,
-            )
+            await self.db.accounts.insert_one(doc)
             return {"ok": True}
         except DuplicateKeyError:
-            # Same session already stored (possibly under another owner)
-            existing = await self.db.accounts.find_one({"session_string": session_string})
-            if existing and existing.get("owner_uid") == owner_uid:
-                # Re-adding your own account → refresh + reactivate
-                await self.db.accounts.update_one(
-                    {"_id": existing["_id"]},
-                    {"$set": {"phone": phone, "name": name, "status": "active",
-                              "current_mode": 0, "in_use": False,
-                              "added_at": datetime.utcnow()}}
-                )
-                return {"ok": True, "refreshed": True}
             return {"ok": False, "exists": True}
 
     async def get_accounts(self, owner_uid):
