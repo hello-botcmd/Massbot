@@ -1,18 +1,16 @@
 import asyncio
 import logging
 import random
-import re
 
 from utils.database import Database
 from utils.account_ops import apply_mode_to_account
-from utils.helpers import esc
+from utils.helpers import esc, MODE_COUNTS_RE
 from bot.keyboards import main_menu_kb
 
 logger = logging.getLogger(__name__)
 db = Database()
 
-# matches "5,3,2" / "5 3 2" / "5;3;2"
-MODE_COUNTS_RE = re.compile(r"^\s*(\d+)\s*[,;\s]\s*(\d+)\s*[,;\s]\s*(\d+)\s*$")
+LABELS = {1: "Always Online", 2: "Online 2 min", 3: "Hidden Last Seen"}
 
 
 async def mode_count_handle(update, context):
@@ -41,8 +39,8 @@ async def mode_count_handle(update, context):
         context.user_data["flow"] = None
         return
 
-    # ⭐ All accounts — including current Mode 3 — go into the pool.
-    # Mode 3 accounts selected for Mode 1/2 are unhidden by apply_mode_to_account.
+    # All accounts — including Mode 3 ones — go into the pool.
+    # Any Mode 3 account landing on Mode 1/2 is unhidden by apply_mode_to_account.
     random.shuffle(accounts)
     sel1 = accounts[:c1]
     sel2 = accounts[c1:c1 + c2]
