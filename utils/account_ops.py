@@ -63,9 +63,10 @@ async def cancel_user_operations(uid: int):
         ev.set()
 
 
-# ── privacy helpers (verified unhide) ────────────────────────
+# ── privacy helpers ──────────────────────────────────────────
 def _rule_is_allow_all(r) -> bool:
-    return isinstance(r, (types.PrivacyValueAllowAll, types.InputPrivacyValueAllowAll))
+    return isinstance(r, (types.PrivacyValueAllowAll,
+                          types.InputPrivacyValueAllowAll))
 
 
 def _rule_is_restrictive(r) -> bool:
@@ -73,18 +74,18 @@ def _rule_is_restrictive(r) -> bool:
         types.PrivacyValueAllowContacts, types.InputPrivacyValueAllowContacts,
         types.PrivacyValueDisallowAll, types.InputPrivacyValueDisallowAll,
         types.PrivacyValueDisallowContacts, types.InputPrivacyValueDisallowContacts,
-        types.PrivacyValueDisallowUsers, types.InputPrivacyValueDisallowUsers,
         types.PrivacyValueAllowUsers, types.InputPrivacyValueAllowUsers,
+        types.PrivacyValueDisallowUsers, types.InputPrivacyValueDisallowUsers,
     ))
 
 
 async def _is_last_seen_visible(client) -> bool:
-    """True if Telegram currently shows the account's last seen to everyone."""
+    """True if Telegram ACTUALLY shows this account's last seen to everyone."""
     try:
         res = await client(GetPrivacyRequest(key=InputPrivacyKeyStatusTimestamp()))
         rules = res.rules
         if not rules:
-            return True                       # empty rules == everyone (default)
+            return True                       # empty == default (everyone)
         has_allow_all = any(_rule_is_allow_all(r) for r in rules)
         has_restrict = any(_rule_is_restrictive(r) for r in rules)
         return has_allow_all and not has_restrict
@@ -105,7 +106,7 @@ async def _set_last_seen_visible(client) -> bool:
     await asyncio.sleep(1.5)
     if await _is_last_seen_visible(client):
         return True
-    # 2) fallback: reset to default (empty rules == Everybody)
+    # 2) fallback: reset to default (empty rules == everybody)
     await client(SetPrivacyRequest(
         key=InputPrivacyKeyStatusTimestamp(),
         rules=[],
@@ -178,13 +179,12 @@ async def stop_account_mode(acc, db):
 async def apply_mode_to_account(acc, mode, db):
     """Apply a mode to ONE account.
 
-    Mode 3 → 1/2 : UNHIDE last seen (verified), THEN go online.
-    Mode 1/2 → 3 : hide last seen (old online task already killed).
+    Mode 1/2: ALWAYS enforce visible last seen on Telegram (unhide if hidden,
+              verify) THEN go online. Never skips the check based on DB flags.
+    Mode 3  : hide last seen from non-contacts.
     """
     account_id = str(acc["_id"])
     tm = TelethonManager()
-
-    was_hidden = bool(acc.get("last_seen_hidden") or acc.get("current_mode") == 3)
     await stop_account_mode(acc, db)   # kill old online task BEFORE switching
 
     if mode in (1, 2):
@@ -193,25 +193,23 @@ async def apply_mode_to_account(acc, mode, db):
             await db.update_account(account_id, {"status": "disconnected"})
             return f"❌ {esc(acc.get('phone','?'))}: session invalid"
         try:
-            unhidden = False
-            if was_hidden:
-                unhidden = await _set_last_seen_visible(client)   # ⭐ verified unhide
-            await client(UpdateStatusRequest(offline=False))      # then online
+            # ⭐ ALWAYS check Telegram's real privacy, not the DB flag
+            was_actually_hidden = not await _is_last_seen_visible(client)
+            unhidden_ok = await _set_last_seen_visible(client)  # enforce visible
+            await client(UpdateStatusRequest(offline=False))    # then online
         except Exception as e:
             return f"❌ {esc(acc.get('phone','?'))}: {esc(e)}"
 
         await db.update_account(account_id, {
             "status": "active", "current_mode": mode,
-            "last_seen_hidden": False if (not was_hidden or unhidden) else True,
+            "last_seen_hidden": False,
             "online_task_running": True, "in_use": True,
         })
         task = asyncio.create_task(_online_loop(acc, mode, db))
         _online_tasks[account_id] = task
         label = "Always Online" if mode == 1 else "Online 2 min"
-        if was_hidden and unhidden:
-            tag = " 🔓 unhidden ✓"
-        elif was_hidden:
-            tag = " ⚠️ unhide NOT confirmed"
+        if was_actually_hidden:
+            tag = " 🔓 unhidden ✓" if unhidden_ok else " ⚠️ unhide FAILED"
         else:
             tag = ""
         return f"✅ {esc(acc.get('phone','?'))}: Mode {mode} ({label}){tag}"
