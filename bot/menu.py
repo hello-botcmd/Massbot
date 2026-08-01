@@ -134,36 +134,7 @@ async def callback_router(update, context):
             parse_mode="Markdown", reply_markup=main_menu_kb())
         return
 
-    # ⭐ All Online: Mode 3 accounts get unhidden FIRST, then forced online
-    if data == "all_online":
-        await query.edit_message_text("🌐 Forcing all accounts online...\n(🔓 unhiding Mode 3 first)",
-                                      reply_markup=None)
-        accounts = [a for a in await db.get_all_accounts() if a.get("status") == "active"]
-        if not accounts:
-            await query.edit_message_text("❌ No active accounts.", reply_markup=main_menu_kb())
-            return
-        success = failed = 0
-        lines = []
-        for acc in accounts:
-            note = " 🔓(unhidden)" if acc.get("current_mode") == 3 else ""
-            try:
-                msg = await apply_mode_to_account(acc, 1, db)
-                if "❌" in msg:
-                    failed += 1
-                else:
-                    success += 1
-                    msg += note
-                lines.append(msg)
-            except Exception as e:
-                failed += 1
-                lines.append(f"❌ {esc(acc.get('phone','?'))}: {esc(e)}")
-            await asyncio.sleep(0.3)
-        detail = "\n".join(lines[-15:])
-        await query.edit_message_text(
-            f"🌐 *All Accounts Online*\n✅ Online: `{success}`\n❌ Failed: `{failed}`\n\n```\n{detail}\n```",
-            parse_mode="Markdown", reply_markup=main_menu_kb())
-        return
-
+    
 
 # ── ONE text router ──────────────────────────────────────────
 async def text_router(update, context):
