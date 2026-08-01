@@ -6,12 +6,11 @@ from config import OWNER_ID, ADMIN_IDS
 
 
 def is_authorized(user_id: int) -> bool:
-    """Owner + admins. Owner is always allowed even if not listed."""
     return user_id == OWNER_ID or user_id in ADMIN_IDS
 
 
 def esc(text) -> str:
-    """Escape user content for Telegram Markdown v1."""
+    """Escape user-provided text for Telegram Markdown v1."""
     return escape_markdown(str(text), version=1)
 
 
@@ -36,10 +35,13 @@ EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]+")
 
 
 def parse_reaction_emojis(text):
-    """Extract unique emoji sequences from a string like '❤️🥰👍'."""
+    """Extract unique emoji sequences like '❤️🥰👍'."""
     out = []
     for chunk in EMOJI_RE.findall(text):
         e = chunk.rstrip("\uFE0F")
         if e and e not in out:
             out.append(e)
     return out
+
+
+MODE_COUNTS_RE = re.compile(r"^\s*(\d+)\s*[,;\s]\s*(\d+)\s*[,;\s]\s*(\d+)\s*$")
