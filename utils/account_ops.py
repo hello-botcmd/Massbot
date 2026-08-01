@@ -1,4 +1,4 @@
-import asyncio
+        import asyncio
 import logging
 import re
 
@@ -10,8 +10,9 @@ from telethon.tl.functions.account import (
 from telethon.tl.functions.messages import SendReactionRequest, GetMessagesViewsRequest
 from telethon.tl.types import (
     InputPrivacyKeyStatusTimestamp,
-    InputPrivacyValueAllowAll,      # last seen visible to everyone (Mode 1/2)
-    InputPrivacyValueAllowContacts, # last seen hidden from non-contacts (Mode 3)
+    InputPrivacyValueAllowAll,
+    InputPrivacyValueAllowContacts,
+    InputPrivacyValueDisallowAll,
 )
 
 from config import ONLINE_PING_INTERVAL, MODE2_ONLINE_DURATION
@@ -62,28 +63,64 @@ async def cancel_user_operations(uid: int):
         ev.set()
 
 
-# ── privacy helpers ──────────────────────────────────────────
-async def _set_last_seen_visible(client):
-    """Unhide last seen. Checks Teleelgram's current rules first,
-    only writes when actually hidden."""
+# ── privacy helpers (verified unhide) ────────────────────────
+def _rule_is_allow_all(r) -> bool:
+    return isinstance(r, (types.PrivacyValueAllowAll, types.InputPrivacyValueAllowAll))
+
+
+def _rule_is_restrictive(r) -> bool:
+    return isinstance(r, (
+        types.PrivacyValueAllowContacts, types.InputPrivacyValueAllowContacts,
+        types.PrivacyValueDisallowAll, types.InputPrivacyValueDisallowAll,
+        types.PrivacyValueDisallowContacts, types.InputPrivacyValueDisallowContacts,
+        types.PrivacyValueDisallowUsers, types.InputPrivacyValueDisallowUsers,
+        types.PrivacyValueAllowUsers, types.InputPrivacyValueAllowUsers,
+    ))
+
+
+async def _is_last_seen_visible(client) -> bool:
+    """True if Telegram currently shows the account's last seen to everyone."""
     try:
         res = await client(GetPrivacyRequest(key=InputPrivacyKeyStatusTimestamp()))
-        if any(isinstance(r, InputPrivacyValueAllowAll) for r in res.rules):
-            return True
+        rules = res.rules
+        if not rules:
+            return True                       # empty rules == everyone (default)
+        has_allow_all = any(_rule_is_allow_all(r) for r in rules)
+        has_restrict = any(_rule_is_restrictive(r) for r in rules)
+        return has_allow_all and not has_restrict
     except Exception as e:
-        logger.warning("GetPrivacy failed (will still set AllowAll): %s", e)
+        logger.warning("GetPrivacy failed: %s", e)
+        return False
+
+
+async def _set_last_seen_visible(client) -> bool:
+    """Unhide → 'Everybody', then VERIFY it stuck. Returns True if confirmed."""
+    if await _is_last_seen_visible(client):
+        return True
+    # 1) explicit Everybody
     await client(SetPrivacyRequest(
         key=InputPrivacyKeyStatusTimestamp(),
         rules=[InputPrivacyValueAllowAll()],
     ))
-    return True
+    await asyncio.sleep(1.5)
+    if await _is_last_seen_visible(client):
+        return True
+    # 2) fallback: reset to default (empty rules == Everybody)
+    await client(SetPrivacyRequest(
+        key=InputPrivacyKeyStatusTimestamp(),
+        rules=[],
+    ))
+    await asyncio.sleep(1.5)
+    return await _is_last_seen_visible(client)
 
 
 async def _set_last_seen_hidden(client):
+    """Hide last seen from non-contacts (Mode 3)."""
     await client(SetPrivacyRequest(
         key=InputPrivacyKeyStatusTimestamp(),
         rules=[InputPrivacyValueAllowContacts()],
     ))
+    await asyncio.sleep(1.0)
 
 
 # ── online loops (mode 1 & 2) ────────────────────────────────
@@ -139,19 +176,16 @@ async def stop_account_mode(acc, db):
 
 
 async def apply_mode_to_account(acc, mode, db):
-    """Apply mode to ONE account. Handles privacy transitions explicitly.
+    """Apply a mode to ONE account.
 
-    Mode 3 (hidden) → Mode 1/2 : UNHIDE last seen first, then go online.
-    Mode 1/2 → Mode 3        : hide last seen (and loop was already stopped).
+    Mode 3 → 1/2 : UNHIDE last seen (verified), THEN go online.
+    Mode 1/2 → 3 : hide last seen (old online task already killed).
     """
     account_id = str(acc["_id"])
     tm = TelethonManager()
 
-    # Was this account hidden? Use the persistent field, fall back to current_mode=3
     was_hidden = bool(acc.get("last_seen_hidden") or acc.get("current_mode") == 3)
-
-    # Always kill any running online task BEFORE switching (no race left behind)
-    await stop_account_mode(acc, db)
+    await stop_account_mode(acc, db)   # kill old online task BEFORE switching
 
     if mode in (1, 2):
         client = await tm.get_persistent_client(account_id, acc["session_string"])
@@ -159,20 +193,27 @@ async def apply_mode_to_account(acc, mode, db):
             await db.update_account(account_id, {"status": "disconnected"})
             return f"❌ {esc(acc.get('phone','?'))}: session invalid"
         try:
+            unhidden = False
             if was_hidden:
-                await _set_last_seen_visible(client)     # ⭐ unhide first
-            await client(UpdateStatusRequest(offline=False))  # then go online
+                unhidden = await _set_last_seen_visible(client)   # ⭐ verified unhide
+            await client(UpdateStatusRequest(offline=False))      # then online
         except Exception as e:
             return f"❌ {esc(acc.get('phone','?'))}: {esc(e)}"
+
         await db.update_account(account_id, {
             "status": "active", "current_mode": mode,
-            "last_seen_hidden": False,
+            "last_seen_hidden": False if (not was_hidden or unhidden) else True,
             "online_task_running": True, "in_use": True,
         })
         task = asyncio.create_task(_online_loop(acc, mode, db))
         _online_tasks[account_id] = task
         label = "Always Online" if mode == 1 else "Online 2 min"
-        tag = " 🔓(unhidden)" if was_hidden else ""
+        if was_hidden and unhidden:
+            tag = " 🔓 unhidden ✓"
+        elif was_hidden:
+            tag = " ⚠️ unhide NOT confirmed"
+        else:
+            tag = ""
         return f"✅ {esc(acc.get('phone','?'))}: Mode {mode} ({label}){tag}"
 
     if mode == 3:
