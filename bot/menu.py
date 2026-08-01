@@ -1,16 +1,13 @@
 import asyncio
 import logging
 
-from telegram import Update
-
-from config import OWNER_ID, ADMIN_IDS
 from utils.database import Database
 from utils.helpers import esc, is_authorized
 from utils.account_ops import (
-    apply_mode_to_account, cancel_user_operations, stop_account_mode,
+    apply_mode_to_account, stop_account_mode,
     get_stop_event, clear_stop_event,
 )
-from bot.keyboards import main_menu_kb, add_type_kb, cancel_kb, mode_kb
+from bot.keyboards import main_menu_kb, add_type_kb, cancel_kb
 from bot.add_account import single_handle, bulk_count_handle, bulk_session_handle
 from bot.join import join_link_handle, join_count_handle, join_timing_handle
 from bot.mode import mode_count_handle
@@ -32,26 +29,31 @@ async def start(update, context):
         parse_mode="Markdown", reply_markup=main_menu_kb())
 
 
+async def _stop_everything(uid):
+    """Layered stop: loops → mode tasks → DB status → fresh event."""
+    get_stop_event(uid).set()
+    accounts = await db.get_active_accounts(uid)
+    for acc in accounts:
+        await stop_account_mode(acc, db)
+    clear_stop_event(uid)
+
+
 async def stop_command(update, context):
     uid = update.effective_user.id
     if not is_authorized(uid):
         await update.message.reply_text("⛔ Unauthorized.")
         return
-    await _cancel_all(uid)
-    context.user_data["flow"] = None
+    await _stop_everything(uid)
+    context.user_data.clear()
     await update.message.reply_text(
-        "✅ All operations and mode tasks stopped.",
-        reply_markup=main_menu_kb())
+        "⏹️ *All operations stopped.*\n"
+        "• Running joins/reactions/views halted\n"
+        "• Mode 1/2 online tasks cancelled\n"
+        "• Accounts marked idle",
+        parse_mode="Markdown", reply_markup=main_menu_kb())
 
 
-async def _cancel_all(uid):
-    await cancel_user_operations(uid)
-    accounts = await db.get_active_accounts(uid)
-    for acc in accounts:
-        await stop_account_mode(acc, db)
-
-
-# ── ONE router for every button. No handler can steal another's state. ──
+# ── ONE router for every button ──────────────────────────────
 async def callback_router(update, context):
     query = update.callback_query
     uid = query.from_user.id
@@ -63,8 +65,8 @@ async def callback_router(update, context):
     await query.answer()
 
     if data == "cancel_op":
-        await _cancel_all(uid)
-        context.user_data["flow"] = None
+        await _stop_everything(uid)
+        context.user_data.clear()
         await query.edit_message_text("❌ Operation cancelled.", reply_markup=main_menu_kb())
         return
 
@@ -96,20 +98,16 @@ async def callback_router(update, context):
                                       parse_mode="Markdown", reply_markup=cancel_kb())
         return
 
+    # ⭐ Mode: one single question — counts for mode1, mode2, mode3
     if data == "mode":
-        await query.edit_message_text("🎭 Select mode to apply:", reply_markup=mode_kb())
-        return
-
-    if data.startswith("mode_sel:"):
-        mode = data.split(":")[1]
-        if mode not in ("1", "2", "3"):
-            return
-        context.user_data["flow"] = f"mode_count_{mode}"
-        labels = {"1": "Mode 1 — Always Online",
-                  "2": "Mode 2 — Online 2 min",
-                  "3": "Mode 3 — Hide Last Seen"}
-        await query.edit_message_text(f"🎭 {labels[mode]}\n🔢 How many accounts?",
-                                      reply_markup=cancel_kb())
+        context.user_data["flow"] = "mode_counts"
+        await query.edit_message_text(
+            "🎭 Send counts as: `mode1, mode2, mode3`\n"
+            "Example: `5,3,2`\n\n"
+            "Mode 1 — Always Online\n"
+            "Mode 2 — Online 2 min\n"
+            "Mode 3 — Hide Last Seen",
+            parse_mode="Markdown", reply_markup=cancel_kb())
         return
 
     if data == "react":
@@ -136,8 +134,10 @@ async def callback_router(update, context):
             parse_mode="Markdown", reply_markup=main_menu_kb())
         return
 
+    # ⭐ All Online: Mode 3 accounts get unhidden FIRST, then forced online
     if data == "all_online":
-        await query.edit_message_text("⏳ Making all accounts online...", reply_markup=None)
+        await query.edit_message_text("🌐 Forcing all accounts online...\n(🔓 unhiding Mode 3 first)",
+                                      reply_markup=None)
         accounts = [a for a in await db.get_all_accounts() if a.get("status") == "active"]
         if not accounts:
             await query.edit_message_text("❌ No active accounts.", reply_markup=main_menu_kb())
@@ -145,12 +145,18 @@ async def callback_router(update, context):
         success = failed = 0
         lines = []
         for acc in accounts:
-            msg = await apply_mode_to_account(acc, 1, db)
-            if "❌" in msg:
+            note = " 🔓(unhidden)" if acc.get("current_mode") == 3 else ""
+            try:
+                msg = await apply_mode_to_account(acc, 1, db)
+                if "❌" in msg:
+                    failed += 1
+                else:
+                    success += 1
+                    msg += note
+                lines.append(msg)
+            except Exception as e:
                 failed += 1
-            else:
-                success += 1
-            lines.append(msg)
+                lines.append(f"❌ {esc(acc.get('phone','?'))}: {esc(e)}")
             await asyncio.sleep(0.3)
         detail = "\n".join(lines[-15:])
         await query.edit_message_text(
@@ -159,7 +165,7 @@ async def callback_router(update, context):
         return
 
 
-# ── ONE text router: reads user_data["flow"], dispatches to the right step ──
+# ── ONE text router ──────────────────────────────────────────
 async def text_router(update, context):
     flow = context.user_data.get("flow")
     if not flow:
@@ -172,9 +178,7 @@ async def text_router(update, context):
         "join_link": join_link_handle,
         "join_count": join_count_handle,
         "join_timing": join_timing_handle,
-        "mode_count_1": mode_count_handle,
-        "mode_count_2": mode_count_handle,
-        "mode_count_3": mode_count_handle,
+        "mode_counts": mode_count_handle,
         "react_link": react_link_handle,
         "react_count": react_count_handle,
         "react_emoji": react_emoji_handle,
