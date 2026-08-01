@@ -1,158 +1,105 @@
 import asyncio
 import logging
+import random
 
-from telegram import Update
-from telegram.ext import (
-    CallbackQueryHandler, MessageHandler, filters,
-    ConversationHandler, ContextTypes
-)
+from telethon.errors import FloodWaitError
 
-from config import OWNER_ID, ADMIN_IDS, REACTION_GAP
+from config import REACTION_GAP
 from utils.database import Database
 from utils.telethon_client import TelethonManager
-from utils.account_ops import (
-    parse_telegram_link, add_reaction,
-    get_stop_event, clear_stop_event
-)
-from utils.helpers import parse_reaction_emojis
+from utils.account_ops import parse_post_link, get_peer, add_reaction, get_stop_event, clear_stop_event
+from utils.helpers import esc, parse_reaction_emojis
 from bot.keyboards import main_menu_kb, cancel_kb
-from bot.states import *
 
 logger = logging.getLogger(__name__)
 db = Database()
-tmanager = TelethonManager()
-
-AUTH = lambda uid: uid == OWNER_ID or uid in ADMIN_IDS
+tm = TelethonManager()
 
 
-async def react_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not AUTH(query.from_user.id):
-        await query.edit_message_text("⛔ Unauthorized.")
-        return ConversationHandler.END
-    await query.edit_message_text(
-        "❤️ Send the **post link** (e.g. `https://t.me/channel/123`):",
-        parse_mode="Markdown",
-        reply_markup=cancel_kb(),
-    )
-    return WAIT_REACTION_LINK
-
-
-async def react_link_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def react_link_handle(update, context):
     link = update.message.text.strip()
-    chat_id, msg_id = parse_telegram_link(link)
-    if not chat_id or not msg_id:
+    try:
+        peer, msg_id = parse_post_link(link)
+    except ValueError as e:
         await update.message.reply_text(
-            "❌ Invalid link. Use: `https://t.me/username/123`",
-            parse_mode="Markdown",
-        )
-        return WAIT_REACTION_LINK
-
-    context.user_data["react_chat"] = chat_id
+            f"❌ {esc(e)}\nUse: `https://t.me/username/123`", parse_mode="Markdown")
+        return
+    context.user_data["react_peer"] = peer
     context.user_data["react_msg"] = msg_id
-    await update.message.reply_text(
-        "🔢 How many **reactions** in total?",
-        reply_markup=cancel_kb(),
-    )
-    return WAIT_REACTION_COUNT
+    context.user_data["flow"] = "react_count"
+    await update.message.reply_text("🔢 How many reactions in total?", reply_markup=cancel_kb())
 
 
-async def react_count_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def react_count_handle(update, context):
     text = update.message.text.strip()
     if not text.isdigit() or int(text) < 1:
         await update.message.reply_text("❌ Send a valid positive number.")
-        return WAIT_REACTION_COUNT
+        return
     context.user_data["react_total"] = int(text)
-    await update.message.reply_text(
-        "😊 Send **reaction emoji(s)** (e.g., `❤️🥰👍`):",
-        reply_markup=cancel_kb(),
-    )
-    return WAIT_REACTION_EMOJI
+    context.user_data["flow"] = "react_emoji"
+    await update.message.reply_text("😊 Send emoji(s), e.g. `❤️🥰👍`",
+                                    parse_mode="Markdown", reply_markup=cancel_kb())
 
 
-async def react_emoji_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def react_emoji_handle(update, context):
     uid = update.effective_user.id
-    emoticons = parse_reaction_emojis(update.message.text.strip())
-    if not emoticons:
+    emojis = parse_reaction_emojis(update.message.text)
+    if not emojis:
         await update.message.reply_text("❌ No emojis found. Send like `❤️🥰`")
-        return WAIT_REACTION_EMOJI
+        return
 
-    chat_id = context.user_data["react_chat"]
+    peer = context.user_data["react_peer"]
     msg_id = context.user_data["react_msg"]
     total = context.user_data["react_total"]
     accounts = await db.get_active_accounts(uid)
 
     if not accounts:
         await update.message.reply_text("❌ No active accounts.", reply_markup=main_menu_kb())
-        for k in ["react_chat", "react_msg", "react_total"]:
-            context.user_data.pop(k, None)
-        return ConversationHandler.END
+        context.user_data["flow"] = None
+        return
 
-    status_msg = await update.message.reply_text(f"⏳ Reacting {total} times...")
+    # Each account can react ONCE per post → cap at account count
+    usable = random.sample(accounts, min(total, len(accounts)))
+    if len(usable) < total:
+        await update.message.reply_text(
+            f"⚠️ Only {len(accounts)} active accounts; reactions capped at {len(usable)}.")
+
+    status = await update.message.reply_text(f"⏳ Adding {len(usable)} reactions...")
     stop_ev = get_stop_event(uid)
-    success = errors = 0
+    success = failed = 0
+    not_in_chat = []
 
-    for i in range(total):
+    for acc in usable:
         if stop_ev.is_set():
             break
-        acc = accounts[i % len(accounts)]
-        client = await tmanager.get_client(acc)
+        client = await tm.get_fresh_client(acc["session_string"])
         if not client:
-            errors += 1
+            failed += 1
             continue
         try:
-            await add_reaction(client, chat_id, msg_id, emoticons)
+            resolved = await get_peer(client, peer)
+            await add_reaction(client, resolved, msg_id, random.choice(emojis))
             success += 1
-        except Exception as e:
-            errors += 1
-            logger.error(f"React error: {e}")
-        if (i + 1) % 10 == 0 or i == total - 1:
+        except FloodWaitError as e:
+            failed += 1
+            logger.warning("FloodWait %ss on %s", e.seconds, acc.get("phone"))
+            await asyncio.sleep(min(e.seconds, 30))
+        except Exception:
+            failed += 1
+            not_in_chat.append(acc.get("phone"))
+        finally:
             try:
-                await status_msg.edit_text(f"⏳ Reacting... {i+1}/{total} | ✅ {success} ❌ {errors}")
+                await client.disconnect()
             except Exception:
                 pass
-        await asyncio.sleep(REACTION_GAP)
+        await asyncio.sleep(REACTION_GAP + random.uniform(0.5, 2))
 
     clear_stop_event(uid)
-    await status_msg.edit_text(
-        f"❤️ *Reaction Complete*\n\n"
-        f"Total: `{total}`\n✅ Success: `{success}`\n❌ Failed: `{errors}`\n"
-        f"Emoji: `{''.join(emoticons)}`",
-        parse_mode="Markdown",
-        reply_markup=main_menu_kb(),
-    )
-    for k in ["react_chat", "react_msg", "react_total"]:
-        context.user_data.pop(k, None)
-    return ConversationHandler.END
-
-
-async def cancel_react(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ Reaction cancelled.", reply_markup=main_menu_kb())
-    return ConversationHandler.END
-
-
-reaction_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(react_entry, pattern="^react$")],
-    states={
-        WAIT_REACTION_LINK: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, react_link_handle)
-        ],
-        WAIT_REACTION_COUNT: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, react_count_handle)
-        ],
-        WAIT_REACTION_EMOJI: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, react_emoji_handle)
-        ],
-    },
-    fallbacks=[
-        CallbackQueryHandler(cancel_react, pattern="^cancel_op$"),
-    ],
-    name="reaction",
-    persistent=False,
-    per_chat=False,
-    per_user=True,
-    allow_reentry=True,
-)
+    msg = (f"❤️ *Reactions Added*\n\n"
+           f"Total attempted: `{success + failed}`\n"
+           f"✅ Success: `{success}`\n"
+           f"❌ Failed: `{failed}`")
+    if not_in_chat:
+        msg += f"\n⚠️ Not in chat: `{len(not_in_chat)}`"
+    await status.edit_text(msg, parse_mode="Markdown", reply_markup=main_menu_kb())
+    context.user_data["flow"] = None
