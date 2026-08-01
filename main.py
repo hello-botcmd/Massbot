@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 
 async def health_check_loop():
-    """Keeps account status honest: persistent clients that died get marked disconnected."""
     from utils.telethon_client import TelethonManager
     db = Database()
     tm = TelethonManager()
@@ -61,6 +60,10 @@ async def error_handler(update, context):
 
 
 def main():
+    if "PASSWORD@" in MONGO_URI or "YOUR_" in str(BOT_TOKEN):
+        print("❌ config.py: fill MONGO_URI (password + cluster) before running.")
+        sys.exit(1)
+
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -74,7 +77,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("remove", remove_start))
-    app.add_handler(CallbackQueryHandler(callback_router))              # ALL buttons
+    app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_error_handler(error_handler)
 
