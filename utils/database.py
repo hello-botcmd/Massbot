@@ -1,110 +1,71 @@
+import logging
 from datetime import datetime
-from bson import ObjectId
+
+from bson.objectid import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
+
 from config import MONGO_URI, DB_NAME
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
     _instance = None
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance.client = None
+            cls._instance.db = None
         return cls._instance
 
-    def __init__(self):
-        if not hasattr(self, '_initialised'):
-            self.client = None
-            self.db = None
-            self._initialised = False
-
     async def connect(self):
-    async def connect(self):
-            self.client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-            self.db = self.client[DB_NAME]
-            await self.db.accounts.create_index("user_id")
-            await self.db.accounts.create_index("phone")
-            self._initialised = True  
-        
-    async def close(self):
-        if self.client:
-            self.client.close()
+        if self.db is not None:
+            return
+        self.client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        self.db = self.client[DB_NAME]
+        await self.db.accounts.create_index("owner_uid")
+        await self.db.accounts.create_index("phone")
+        logger.info("MongoDB connected: %s", DB_NAME)
 
-    # ── Account CRUD ──
-
-    async def add_account(self, user_id: int, phone: str, session_string: str) -> ObjectId:
-        col = self.db.accounts
-        existing = await col.find_one({"user_id": user_id, "phone": phone})
-        if existing:
-            await col.update_one(
-                {"_id": existing["_id"]},
-                {"$set": {
-                    "session_string": session_string,
-                    "status": "active",
-                    "updated_at": datetime.utcnow()
-                }}
-            )
-            return existing["_id"]
-        result = await col.insert_one({
-            "user_id": user_id,
+    async def add_account(self, owner_uid, phone, session_string, name=""):
+        doc = {
+            "owner_uid": owner_uid,
             "phone": phone,
+            "name": name,
             "session_string": session_string,
-            "added_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-            "status": "active",
-            "current_mode": None,
-            "is_online": False,
-            "last_seen_hidden": False,
-            "online_task_running": False,
+            "status": "active",          # active | disconnected
+            "current_mode": 0,
             "in_use": False,
-        })
-        return result.inserted_id
-
-    async def get_account(self, account_id: ObjectId) -> dict:
-        return await self.db.accounts.find_one({"_id": account_id})
-
-    async def get_user_accounts(self, user_id: int) -> list:
-        cursor = self.db.accounts.find({"user_id": user_id})
-        return await cursor.to_list(length=None)
-
-    async def get_active_accounts(self, user_id: int) -> list:
-        cursor = self.db.accounts.find({"user_id": user_id, "status": "active"})
-        return await cursor.to_list(length=None)
-
-    async def get_all_accounts(self) -> list:
-        cursor = self.db.accounts.find({})
-        return await cursor.to_list(length=None)
-
-    async def get_all_active_accounts(self) -> list:
-        cursor = self.db.accounts.find({"status": "active"})
-        return await cursor.to_list(length=None)
-
-    async def get_account_counts(self, user_id: int = None) -> dict:
-        col = self.db.accounts
-        if user_id:
-            total = await col.count_documents({"user_id": user_id})
-            active = await col.count_documents({"user_id": user_id, "status": "active"})
-        else:
-            total = await col.count_documents({})
-            active = await col.count_documents({"status": "active"})
-        return {"total": total, "active": active}
-
-    async def get_global_counts(self) -> dict:
-        """Counts across all users (for owner view)."""
-        col = self.db.accounts
-        total = await col.count_documents({})
-        active = await col.count_documents({"status": "active"})
-        return {"total": total, "active": active}
-
-    async def update_account(self, account_id: ObjectId, **kwargs):
-        kwargs["updated_at"] = datetime.utcnow()
+            "added_at": datetime.utcnow(),
+        }
         await self.db.accounts.update_one(
-            {"_id": account_id},
-            {"$set": kwargs}
+            {"owner_uid": owner_uid, "phone": phone},
+            {"$set": doc},
+            upsert=True,
         )
 
-    async def delete_account(self, account_id: ObjectId):
-        await self.db.accounts.delete_one({"_id": account_id})
+    async def get_accounts(self, owner_uid):
+        return [a async for a in self.db.accounts.find({"owner_uid": owner_uid})]
 
-    async def delete_user_accounts(self, user_id: int):
-        await self.db.accounts.delete_many({"user_id": user_id})
+    async def get_active_accounts(self, owner_uid):
+        return [a async for a in self.db.accounts.find({"owner_uid": owner_uid, "status": "active"})]
+
+    async def get_all_accounts(self):
+        return [a async for a in self.db.accounts.find({})]
+
+    async def update_account(self, account_id, fields):
+        oid = account_id if isinstance(account_id, ObjectId) else ObjectId(account_id)
+        await self.db.accounts.update_one({"_id": oid}, {"$set": fields})
+
+    async def get_global_counts(self, owner_uid):
+        accounts = await self.get_accounts(owner_uid)
+        total = len(accounts)
+        active = sum(1 for a in accounts if a.get("status") == "active")
+        disconnected = sum(1 for a in accounts if a.get("status") == "disconnected")
+        in_use = sum(1 for a in accounts if a.get("in_use"))
+        idle = sum(1 for a in accounts if a.get("status") == "active" and not a.get("in_use"))
+        return {
+            "total": total, "active": active, "disconnected": disconnected,
+            "in_use": in_use, "idle": idle,
+        }
