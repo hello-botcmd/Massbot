@@ -28,7 +28,6 @@ class Database:
         await self.db.accounts.create_index("owner_uid")
         await self.db.accounts.create_index("tg_id")
         await self.db.accounts.create_index("phone")
-        # Drop the legacy unique index that caused E11000 on re-adds
         try:
             await self.db.accounts.drop_index("session_string_1")
         except Exception:
@@ -36,30 +35,26 @@ class Database:
         logger.info("MongoDB connected: %s", DB_NAME)
 
     async def add_account(self, owner_uid, tg_id, phone, session_string, name=""):
-        """Dedupe by Telegram account ID.
-        Returns {"ok": bool, "refreshed": bool, "exists": bool}"""
-        # Same Telegram account already stored?
+        """SHARED pool — dedupe by Telegram ID across ALL admins.
+        Returns {"ok": True, "refreshed": bool}"""
         existing = await self.db.accounts.find_one({"tg_id": tg_id})
         if existing is None:
-            # Legacy docs (pre-tg_id) — fall back to phone
-            existing = await self.db.accounts.find_one(
-                {"owner_uid": owner_uid, "phone": phone})
+            existing = await self.db.accounts.find_one({"phone": phone})
 
         if existing:
-            if existing.get("owner_uid") != owner_uid:
-                return {"ok": False, "exists": True}   # used by another admin
-            # Same owner re-adds → refresh session + reactivate
+            # Same ID anywhere in the pool → just refresh (owner_uid = who added last)
             await self.db.accounts.update_one(
                 {"_id": existing["_id"]},
                 {"$set": {
+                    "owner_uid": owner_uid,
                     "tg_id": tg_id,
                     "phone": phone,
                     "name": name,
                     "session_string": session_string,
                     "status": "active",
-                    "current_mode": 0,
+                    "current_mode": existing.get("current_mode", 0),
                     "last_seen_hidden": existing.get("last_seen_hidden", False),
-                    "in_use": False,
+                    "in_use": existing.get("in_use", False),
                     "added_at": datetime.utcnow(),
                 }}
             )
@@ -81,13 +76,14 @@ class Database:
             await self.db.accounts.insert_one(doc)
             return {"ok": True}
         except DuplicateKeyError:
-            return {"ok": False, "exists": True}
+            return {"ok": True, "refreshed": True}
 
-    async def get_accounts(self, owner_uid):
-        return [a async for a in self.db.accounts.find({"owner_uid": owner_uid})]
+    async def get_accounts(self):
+        """ALL accounts — shared pool, every admin sees everything."""
+        return [a async for a in self.db.accounts.find({})]
 
-    async def get_active_accounts(self, owner_uid):
-        return [a async for a in self.db.accounts.find({"owner_uid": owner_uid, "status": "active"})]
+    async def get_active_accounts(self):
+        return [a async for a in self.db.accounts.find({"status": "active"})]
 
     async def get_all_accounts(self):
         return [a async for a in self.db.accounts.find({})]
@@ -96,8 +92,8 @@ class Database:
         oid = account_id if isinstance(account_id, ObjectId) else ObjectId(account_id)
         await self.db.accounts.update_one({"_id": oid}, {"$set": fields})
 
-    async def get_global_counts(self, owner_uid):
-        accounts = await self.get_accounts(owner_uid)
+    async def get_global_counts(self):
+        accounts = await self.get_accounts()
         total = len(accounts)
         active = sum(1 for a in accounts if a.get("status") == "active")
         disconnected = sum(1 for a in accounts if a.get("status") == "disconnected")
