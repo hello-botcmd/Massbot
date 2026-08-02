@@ -3,16 +3,20 @@ import logging
 import re
 
 from telethon import functions, types
-from telethon.errors import UserAlreadyParticipantError
+from telethon.errors import (
+    UserAlreadyParticipantError, InviteRequestSentError,
+)
 from telethon.tl.functions.account import (
     UpdateStatusRequest, SetPrivacyRequest, GetPrivacyRequest,
 )
-from telethon.tl.functions.messages import SendReactionRequest, GetMessagesViewsRequest
+from telethon.tl.functions.messages import (
+    SendReactionRequest, GetMessagesViewsRequest, ImportChatInviteRequest,
+)
 from telethon.tl.types import (
     InputPrivacyKeyStatusTimestamp,
     InputPrivacyValueAllowAll,
     InputPrivacyValueAllowContacts,
-    InputPrivacyValueDisallowAll,
+    UpdatePendingJoinRequests,
 )
 
 from config import ONLINE_PING_INTERVAL, MODE2_ONLINE_DURATION
@@ -23,8 +27,30 @@ logger = logging.getLogger(__name__)
 
 LINK_PATTERN = re.compile(r"https?://t\.me/(?:c/(\d+)|([^/]+))/(\d+)")
 
-_stop_events = {}    # owner_uid -> asyncio.Event
+# ── stop machinery — ONE GLOBAL EVENT (shared pool: any admin stops all) ──
+_stop_event = None
 _online_tasks = {}   # account_id -> asyncio.Task
+
+
+def get_stop_event() -> asyncio.Event:
+    global _stop_event
+    if _stop_event is None:
+        _stop_event = asyncio.Event()
+    return _stop_event
+
+
+def clear_stop_event():
+    global _stop_event
+    _stop_event = None
+
+
+async def cancel_user_operations(uid=None):
+    get_stop_event().set()
+
+
+def is_mode_task_running(account_id: str) -> bool:
+    task = _online_tasks.get(account_id)
+    return task is not None and not task.done()
 
 
 # ── link parsing ─────────────────────────────────────────────
@@ -44,26 +70,7 @@ async def get_peer(client, peer_id):
     return await client.get_entity(peer_id)
 
 
-# ── stop machinery ───────────────────────────────────────────
-def get_stop_event(uid: int) -> asyncio.Event:
-    if uid not in _stop_events:
-        _stop_events[uid] = asyncio.Event()
-    return _stop_events[uid]
-
-
-def clear_stop_event(uid: int):
-    ev = _stop_events.pop(uid, None)
-    if ev:
-        ev.set()
-
-
-async def cancel_user_operations(uid: int):
-    ev = _stop_events.get(uid)
-    if ev:
-        ev.set()
-
-
-# ── privacy helpers ──────────────────────────────────────────
+# ── privacy helpers (verified unhide) ────────────────────────
 def _rule_is_allow_all(r) -> bool:
     return isinstance(r, (types.PrivacyValueAllowAll,
                           types.InputPrivacyValueAllowAll))
@@ -94,10 +101,10 @@ async def _is_last_seen_visible(client) -> bool:
         return False
 
 
-async def _set_last_seen_visible(client) -> bool:
-    """Unhide → 'Everybody', then VERIFY it stuck. Returns True if confirmed."""
+async def _ensure_last_seen_visible(client) -> tuple:
+    """Enforce visible last seen. Returns (was_hidden, is_visible_now)."""
     if await _is_last_seen_visible(client):
-        return True
+        return False, True
     # 1) explicit Everybody
     await client(SetPrivacyRequest(
         key=InputPrivacyKeyStatusTimestamp(),
@@ -105,14 +112,14 @@ async def _set_last_seen_visible(client) -> bool:
     ))
     await asyncio.sleep(1.5)
     if await _is_last_seen_visible(client):
-        return True
+        return True, True
     # 2) fallback: reset to default (empty rules == everybody)
     await client(SetPrivacyRequest(
         key=InputPrivacyKeyStatusTimestamp(),
         rules=[],
     ))
     await asyncio.sleep(1.5)
-    return await _is_last_seen_visible(client)
+    return True, await _is_last_seen_visible(client)
 
 
 async def _set_last_seen_hidden(client):
@@ -124,28 +131,39 @@ async def _set_last_seen_hidden(client):
     await asyncio.sleep(1.0)
 
 
-# ── online loops (mode 1 & 2) ────────────────────────────────
+# ── online loops (mode 1 & 2) with auto-reconnect ────────────
 async def _online_loop(acc, mode, db):
     account_id = str(acc["_id"])
     tm = TelethonManager()
+    stop_ev = get_stop_event()     # capture once — survives clear_stop_event()
+    client = None
     try:
-        client = await tm.get_persistent_client(account_id, acc["session_string"])
-        if not client:
-            await db.update_account(account_id, {"status": "disconnected"})
-            return
         while True:
-            ev = _stop_events.get(acc["owner_uid"])
-            if ev and ev.is_set():
+            if stop_ev.is_set():
                 break
+            # (re)connect if needed
+            if client is None or not client.is_connected():
+                await tm.drop_persistent(account_id)
+                client = await tm.get_persistent_client(account_id, acc["session_string"])
+                if client is None:
+                    await db.update_account(account_id, {"status": "disconnected"})
+                    return
             try:
                 await client(UpdateStatusRequest(offline=False))
                 if mode == 2:
                     await asyncio.sleep(MODE2_ONLINE_DURATION)
+                    if stop_ev.is_set():
+                        break
                     await client(UpdateStatusRequest(offline=True))
                     break
             except Exception as e:
                 logger.warning("online ping error %s: %s", acc.get("phone"), e)
                 await asyncio.sleep(5)
+                try:
+                    await tm.drop_persistent(account_id)
+                except Exception:
+                    pass
+                client = None          # force reconnect next iteration
                 continue
             await asyncio.sleep(ONLINE_PING_INTERVAL)
     finally:
@@ -179,8 +197,8 @@ async def stop_account_mode(acc, db):
 async def apply_mode_to_account(acc, mode, db):
     """Apply a mode to ONE account.
 
-    Mode 1/2: ALWAYS enforce visible last seen on Telegram (unhide if hidden,
-              verify) THEN go online. Never skips the check based on DB flags.
+    Mode 1/2: ALWAYS enforce visible last seen (check real Telegram state,
+              unhide + verify if needed), THEN go online.
     Mode 3  : hide last seen from non-contacts.
     """
     account_id = str(acc["_id"])
@@ -193,10 +211,8 @@ async def apply_mode_to_account(acc, mode, db):
             await db.update_account(account_id, {"status": "disconnected"})
             return f"❌ {esc(acc.get('phone','?'))}: session invalid"
         try:
-            # ⭐ ALWAYS check Telegram's real privacy, not the DB flag
-            was_actually_hidden = not await _is_last_seen_visible(client)
-            unhidden_ok = await _set_last_seen_visible(client)  # enforce visible
-            await client(UpdateStatusRequest(offline=False))    # then online
+            was_hidden, now_visible = await _ensure_last_seen_visible(client)
+            await client(UpdateStatusRequest(offline=False))   # then online
         except Exception as e:
             return f"❌ {esc(acc.get('phone','?'))}: {esc(e)}"
 
@@ -208,8 +224,8 @@ async def apply_mode_to_account(acc, mode, db):
         task = asyncio.create_task(_online_loop(acc, mode, db))
         _online_tasks[account_id] = task
         label = "Always Online" if mode == 1 else "Online 2 min"
-        if was_actually_hidden:
-            tag = " 🔓 unhidden ✓" if unhidden_ok else " ⚠️ unhide FAILED"
+        if was_hidden:
+            tag = " 🔓 unhidden ✓" if now_visible else " ⚠️ unhide FAILED"
         else:
             tag = ""
         return f"✅ {esc(acc.get('phone','?'))}: Mode {mode} ({label}){tag}"
@@ -234,24 +250,59 @@ async def apply_mode_to_account(acc, mode, db):
     return f"❌ {esc(acc.get('phone','?'))}: unknown mode"
 
 
-# ── join / leave ─────────────────────────────────────────────
+# ── JOIN — direct join AND join-request (approval) flows ─────
+def _has_pending(updates) -> bool:
+    if isinstance(updates, types.Updates):
+        return any(isinstance(u, UpdatePendingJoinRequests) for u in updates.updates)
+    return False
+
+
+def _parse_join_target(target: str):
+    """Returns ('username', name) or ('invite', hash)."""
+    t = target.strip()
+    if t.startswith("https://t.me/"):
+        t = t[len("https://t.me/"):]
+    elif t.startswith("t.me/"):
+        t = t[len("t.me/"):]
+    elif t.startswith("@"):
+        t = t[1:]
+    t = t.rstrip("/")
+    if t.startswith("joinchat/"):
+        return ("invite", t[len("joinchat/"):])
+    if t.startswith("+"):
+        return ("invite", t[1:])
+    return ("username", t)
+
+
 async def join_target(client, target: str):
-    target = target.strip()
+    """Join a channel/group.
+    Public/private links → direct join.
+    Approval-required links → sends join request automatically.
+    """
+    kind, val = _parse_join_target(target)
+    if not val:
+        return False, "invalid target"
     try:
-        if target.startswith("https://t.me/") or target.startswith("t.me/"):
-            entity = await client.get_entity(target)
-            await client(functions.channels.JoinChannelRequest(entity))
-            return True, "joined via link"
-        if target.startswith("@"):
-            entity = await client.get_entity(target)
-            await client(functions.channels.JoinChannelRequest(entity))
-            return True, "joined"
-        await client(functions.messages.ImportChatInviteRequest(hash=target.split("/")[-1]))
-        return True, "joined via invite"
+        if kind == "invite":
+            updates = await client(ImportChatInviteRequest(hash=val))
+            if _has_pending(updates):
+                return True, "join request sent (awaiting approval)"
+            return True, "joined via invite"
+        # username / public
+        entity = await client.get_entity(val)
+        updates = await client(functions.channels.JoinChannelRequest(entity))
+        if _has_pending(updates):
+            return True, "join request sent (awaiting approval)"
+        return True, "joined"
     except UserAlreadyParticipantError:
         return True, "already joined"
+    except InviteRequestSentError:
+        return True, "join request already sent"
     except Exception as e:
-        return False, str(e)
+        msg = str(e)
+        if "already" in msg.lower() or "participant" in msg.lower():
+            return True, "already joined"
+        return False, msg
 
 
 async def leave_target(client, target: str):
