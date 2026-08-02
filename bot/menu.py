@@ -25,17 +25,18 @@ async def start(update, context):
         await update.message.reply_text("⛔ Unauthorized.")
         return
     await update.message.reply_text(
-        "🤖 *Telegram Account Management Bot*\n\nChoose an action:",
+        "🤖 *Telegram Account Management Bot*\n\n"
+        "Shared account pool — all admins use the same IDs.",
         parse_mode="Markdown", reply_markup=main_menu_kb())
 
 
-async def _stop_everything(uid):
-    """Layered stop: loops → mode tasks → DB status → fresh event."""
-    get_stop_event(uid).set()
-    accounts = await db.get_active_accounts(uid)
+async def _stop_everything():
+    """Stop ALL running operations & mode tasks (shared pool)."""
+    get_stop_event().set()                 # signal running loops
+    accounts = await db.get_active_accounts()
     for acc in accounts:
         await stop_account_mode(acc, db)
-    clear_stop_event(uid)
+    clear_stop_event()                     # fresh event for next op
 
 
 async def stop_command(update, context):
@@ -43,7 +44,7 @@ async def stop_command(update, context):
     if not is_authorized(uid):
         await update.message.reply_text("⛔ Unauthorized.")
         return
-    await _stop_everything(uid)
+    await _stop_everything()
     context.user_data.clear()
     await update.message.reply_text(
         "⏹️ *All operations stopped.*\n"
@@ -53,7 +54,6 @@ async def stop_command(update, context):
         parse_mode="Markdown", reply_markup=main_menu_kb())
 
 
-# ── ONE router for every button ──────────────────────────────
 async def callback_router(update, context):
     query = update.callback_query
     uid = query.from_user.id
@@ -65,7 +65,7 @@ async def callback_router(update, context):
     await query.answer()
 
     if data == "cancel_op":
-        await _stop_everything(uid)
+        await _stop_everything()
         context.user_data.clear()
         await query.edit_message_text("❌ Operation cancelled.", reply_markup=main_menu_kb())
         return
@@ -94,11 +94,14 @@ async def callback_router(update, context):
 
     if data == "join":
         context.user_data["flow"] = "join_link"
-        await query.edit_message_text("🔗 Send channel/group **username** or **invite link**:",
-                                      parse_mode="Markdown", reply_markup=cancel_kb())
+        await query.edit_message_text(
+            "🔗 Send the channel/group link:\n"
+            "• Public: `https://t.me/username`\n"
+            "• Private invite: `https://t.me/+hash` or `joinchat/hash`\n"
+            "• Approval-required links work too (auto join-request)",
+            parse_mode="Markdown", reply_markup=cancel_kb())
         return
 
-    # ⭐ Mode: one single question — counts for mode1, mode2, mode3
     if data == "mode":
         context.user_data["flow"] = "mode_counts"
         await query.edit_message_text(
@@ -123,9 +126,9 @@ async def callback_router(update, context):
         return
 
     if data == "total_acc":
-        counts = await db.get_global_counts(uid)
+        counts = await db.get_global_counts()
         await query.edit_message_text(
-            "📊 *Account Statistics*\n\n"
+            "📊 *Account Statistics (shared pool)*\n\n"
             f"📚 Total added: `{counts['total']}`\n"
             f"🟢 Active: `{counts['active']}`\n"
             f"🔴 Disconnected: `{counts['disconnected']}`\n"
@@ -134,9 +137,36 @@ async def callback_router(update, context):
             parse_mode="Markdown", reply_markup=main_menu_kb())
         return
 
-    
+    if data == "all_online":
+        await query.edit_message_text("🌐 Forcing all accounts online...",
+                                      reply_markup=None)
+        accounts = [a for a in await db.get_all_accounts() if a.get("status") == "active"]
+        if not accounts:
+            await query.edit_message_text("❌ No active accounts.", reply_markup=main_menu_kb())
+            return
+        success = failed = 0
+        lines = []
+        for acc in accounts:
+            try:
+                msg = await apply_mode_to_account(acc, 1, db)
+                if "❌" in msg:
+                    failed += 1
+                else:
+                    success += 1
+                lines.append(msg)
+            except Exception as e:
+                failed += 1
+                lines.append(f"❌ {esc(acc.get('phone','?'))}: {esc(e)}")
+            await asyncio.sleep(0.3)
+        detail = "\n".join(lines[-20:])
+        if len(lines) > 20:
+            detail = f"... and {len(lines)-20} more\n" + detail
+        await query.edit_message_text(
+            f"🌐 *All Accounts Online*\n✅ Online: `{success}`\n❌ Failed: `{failed}`\n\n```\n{detail}\n```",
+            parse_mode="Markdown", reply_markup=main_menu_kb())
+        return
 
-# ── ONE text router ──────────────────────────────────────────
+
 async def text_router(update, context):
     flow = context.user_data.get("flow")
     if not flow:
