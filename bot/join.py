@@ -4,7 +4,9 @@ import random
 
 from utils.database import Database
 from utils.telethon_client import TelethonManager
-from utils.account_ops import join_target, get_stop_event, clear_stop_event
+from utils.account_ops import (
+    join_target, get_stop_event, clear_stop_event,
+)
 from utils.helpers import esc, parse_timing
 from bot.keyboards import main_menu_kb, cancel_kb
 
@@ -16,7 +18,9 @@ tm = TelethonManager()
 async def join_link_handle(update, context):
     context.user_data["join_target"] = update.message.text.strip()
     context.user_data["flow"] = "join_count"
-    await update.message.reply_text("🔢 How many accounts should join?", reply_markup=cancel_kb())
+    await update.message.reply_text(
+        "🔢 How many accounts should join?",
+        reply_markup=cancel_kb())
 
 
 async def join_count_handle(update, context):
@@ -31,7 +35,6 @@ async def join_count_handle(update, context):
 
 
 async def join_timing_handle(update, context):
-    uid = update.effective_user.id
     timing = parse_timing(update.message.text.strip())
     if not timing:
         await update.message.reply_text("❌ Invalid timing. e.g. `min-1s max-8s`")
@@ -40,7 +43,7 @@ async def join_timing_handle(update, context):
     min_s, max_s = timing
     target = context.user_data.get("join_target")
     count = context.user_data.get("join_count", 1)
-    accounts = await db.get_active_accounts(uid)
+    accounts = await db.get_active_accounts()
 
     if len(accounts) < count:
         await update.message.reply_text(
@@ -52,7 +55,8 @@ async def join_timing_handle(update, context):
     selected = random.sample(accounts, count)
     status = await update.message.reply_text(
         f"⏳ Joining {count} accounts to {esc(target)}...")
-    stop_ev = get_stop_event(uid)
+    clear_stop_event()
+    stop_ev = get_stop_event()
     results = []
 
     for i, acc in enumerate(selected):
@@ -81,7 +85,7 @@ async def join_timing_handle(update, context):
         if i < count - 1 and not stop_ev.is_set():
             await asyncio.sleep(min_s if i % 2 == 0 else max_s)
 
-    clear_stop_event(uid)
+    clear_stop_event()
     detail = "\n".join(results[-15:])
     await status.edit_text(
         f"🔗 *Join Results*\n\n```\n{detail}\n```",
