@@ -40,7 +40,6 @@ async def views_links_handle(update, context):
 
 
 async def views_count_handle(update, context):
-    uid = update.effective_user.id
     text = update.message.text.strip()
     if not text.isdigit() or int(text) < 1:
         await update.message.reply_text("❌ Send a valid positive number.")
@@ -48,7 +47,7 @@ async def views_count_handle(update, context):
 
     views_pp = int(text)
     posts = context.user_data["views_posts"]
-    accounts = await db.get_active_accounts(uid)
+    accounts = await db.get_active_accounts()
 
     if not accounts:
         await update.message.reply_text("❌ No active accounts.", reply_markup=main_menu_kb())
@@ -57,7 +56,8 @@ async def views_count_handle(update, context):
 
     status = await update.message.reply_text(
         f"⏳ Boosting {views_pp} views on {len(posts)} post(s)...")
-    stop_ev = get_stop_event(uid)
+    clear_stop_event()
+    stop_ev = get_stop_event()
     total = success = failed = 0
 
     for pi, (peer, mid) in enumerate(posts):
@@ -92,8 +92,10 @@ async def views_count_handle(update, context):
                 except Exception:
                     pass
             await asyncio.sleep(VIEW_GAP + random.uniform(0.5, 2))
+        if stop_ev.is_set():
+            break
 
-    clear_stop_event(uid)
+    clear_stop_event()
     await status.edit_text(
         f"👁️ *Views Complete*\n\n"
         f"Posts: `{len(posts)}`\nViews/post: `{views_pp}`\n"
