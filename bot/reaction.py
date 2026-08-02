@@ -7,7 +7,9 @@ from telethon.errors import FloodWaitError
 from config import REACTION_GAP
 from utils.database import Database
 from utils.telethon_client import TelethonManager
-from utils.account_ops import parse_post_link, get_peer, add_reaction, get_stop_event, clear_stop_event
+from utils.account_ops import (
+    parse_post_link, get_peer, add_reaction, get_stop_event, clear_stop_event,
+)
 from utils.helpers import esc, parse_reaction_emojis
 from bot.keyboards import main_menu_kb, cancel_kb
 
@@ -42,7 +44,6 @@ async def react_count_handle(update, context):
 
 
 async def react_emoji_handle(update, context):
-    uid = update.effective_user.id
     emojis = parse_reaction_emojis(update.message.text)
     if not emojis:
         await update.message.reply_text("❌ No emojis found. Send like `❤️🥰`")
@@ -51,21 +52,21 @@ async def react_emoji_handle(update, context):
     peer = context.user_data["react_peer"]
     msg_id = context.user_data["react_msg"]
     total = context.user_data["react_total"]
-    accounts = await db.get_active_accounts(uid)
+    accounts = await db.get_active_accounts()
 
     if not accounts:
         await update.message.reply_text("❌ No active accounts.", reply_markup=main_menu_kb())
         context.user_data["flow"] = None
         return
 
-    # Each account can react ONCE per post → cap at account count
     usable = random.sample(accounts, min(total, len(accounts)))
     if len(usable) < total:
         await update.message.reply_text(
             f"⚠️ Only {len(accounts)} active accounts; reactions capped at {len(usable)}.")
 
     status = await update.message.reply_text(f"⏳ Adding {len(usable)} reactions...")
-    stop_ev = get_stop_event(uid)
+    clear_stop_event()
+    stop_ev = get_stop_event()
     success = failed = 0
     not_in_chat = []
 
@@ -94,7 +95,7 @@ async def react_emoji_handle(update, context):
                 pass
         await asyncio.sleep(REACTION_GAP + random.uniform(0.5, 2))
 
-    clear_stop_event(uid)
+    clear_stop_event()
     msg = (f"❤️ *Reactions Added*\n\n"
            f"Total attempted: `{success + failed}`\n"
            f"✅ Success: `{success}`\n"
