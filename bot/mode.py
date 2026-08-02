@@ -14,7 +14,6 @@ LABELS = {1: "Always Online", 2: "Online 2 min", 3: "Hidden Last Seen"}
 
 
 async def mode_count_handle(update, context):
-    uid = update.effective_user.id
     m = MODE_COUNTS_RE.match(update.message.text.strip())
     if not m:
         await update.message.reply_text(
@@ -31,7 +30,7 @@ async def mode_count_handle(update, context):
         await update.message.reply_text("❌ Counts must be positive.")
         return
 
-    accounts = await db.get_active_accounts(uid)
+    accounts = await db.get_active_accounts()
     if len(accounts) < total:
         await update.message.reply_text(
             f"❌ Need `{total}` active accounts, only `{len(accounts)}` available.",
@@ -39,8 +38,6 @@ async def mode_count_handle(update, context):
         context.user_data["flow"] = None
         return
 
-    # All accounts — including Mode 3 ones — go into the pool.
-    # Any Mode 3 account landing on Mode 1/2 is unhidden by apply_mode_to_account.
     random.shuffle(accounts)
     sel1 = accounts[:c1]
     sel2 = accounts[c1:c1 + c2]
