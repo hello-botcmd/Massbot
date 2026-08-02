@@ -23,9 +23,8 @@ async def remove_start(update, context):
 
 
 async def remove_chat_handle(update, context):
-    uid = update.effective_user.id
     target = update.message.text.strip()
-    accounts = await db.get_active_accounts(uid)
+    accounts = await db.get_active_accounts()
 
     if not accounts:
         await update.message.reply_text("❌ No active accounts.", reply_markup=main_menu_kb())
@@ -34,7 +33,8 @@ async def remove_chat_handle(update, context):
 
     status = await update.message.reply_text(
         f"⏳ Leaving {esc(target)} with {len(accounts)} accounts...")
-    stop_ev = get_stop_event(uid)
+    clear_stop_event()
+    stop_ev = get_stop_event()
     success = failed = 0
 
     for i, acc in enumerate(accounts):
@@ -64,7 +64,7 @@ async def remove_chat_handle(update, context):
                 pass
         await asyncio.sleep(1)
 
-    clear_stop_event(uid)
+    clear_stop_event()
     await status.edit_text(
         f"🗑️ *Remove Complete*\n\nChat: `{esc(target)}`\n"
         f"✅ Left: `{success}`\n❌ Failed: `{failed}`",
