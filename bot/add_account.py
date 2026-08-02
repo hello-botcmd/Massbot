@@ -36,19 +36,14 @@ async def single_handle(update, context):
         context.user_data["flow"] = None
         return
 
-    if res.get("exists") and not res.get("ok"):
+    if res.get("refreshed"):
         await status.edit_text(
-            "⚠️ This Telegram account is **already added by another admin**.\n"
-            "Each session can only be used once.",
-            parse_mode="Markdown", reply_markup=main_menu_kb())
-    elif res.get("refreshed"):
-        await status.edit_text(
-            f"🔄 Account already existed — *session refreshed & reactivated*.\n"
+            f"🔄 Account already in the shared pool — *session refreshed*.\n"
             f"📱 Phone: `{esc(phone)}`\n👤 Name: {esc(name)}",
             parse_mode="Markdown", reply_markup=main_menu_kb())
     else:
         await status.edit_text(
-            f"✅ *Account Added!*\n\n📱 Phone: `{esc(phone)}`\n"
+            f"✅ *Account Added to Shared Pool!*\n\n📱 Phone: `{esc(phone)}`\n"
             f"👤 Name: {esc(name)}\n🆔 ID: `{me.id}`",
             parse_mode="Markdown", reply_markup=main_menu_kb())
     context.user_data["flow"] = None
@@ -93,11 +88,7 @@ async def bulk_session_handle(update, context):
         await client.disconnect()
         try:
             res = await db.add_account(uid, me.id, phone, session_str, name)
-            if res.get("exists") and not res.get("ok"):
-                context.user_data["add_fail"] = context.user_data.get("add_fail", 0) + 1
-                context.user_data["add_log"].append(f"⚠️ #{idx} used by another admin")
-                await status.edit_text(f"⚠️ #{idx} already used by another admin.")
-            elif res.get("refreshed"):
+            if res.get("refreshed"):
                 context.user_data["add_ok"] = context.user_data.get("add_ok", 0) + 1
                 context.user_data["add_log"].append(f"🔄 #{idx} refreshed {phone}")
                 await status.edit_text(f"🔄 #{idx} refreshed: {esc(phone)}")
