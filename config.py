@@ -5,7 +5,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 # ── MongoDB ──
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "telegram_account_bot")
+DB_NAME = os.getenv("DB_NAME", "mass_bot")
 
 # ── Telegram API Credentials (from my.telegram.org) ──
 API_ID = int(os.getenv("API_ID", "0"))          # ← put your API ID here, e.g. 123456
