@@ -12,7 +12,7 @@ BOT_TOKEN = "8881959713:AAFpjIXWuzEt3EwqDmn_bA0zHg6lMk7Au1o"
 #     must be percent-encoded. Also fix cluster0.mongodb.net
 #     if your cluster host differs.
 MONGO_URI = "mongodb+srv://quantumsoul120_db_user:Rv3nb9ChcyeDAxxr@cluster0.55zdpug.mongodb.net/?appName=Cluster0"
-DB_NAME = "mass"
+DB_NAME = "Mass"
 
 # ── Telegram API credentials (my.telegram.org) ───────────────
 API_ID = 22657083
