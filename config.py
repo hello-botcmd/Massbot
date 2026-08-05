@@ -27,7 +27,7 @@ if OWNER_ID not in ADMIN_IDS:
 
 # ── Operational constants ────────────────────────────────────
 ONLINE_PING_INTERVAL = 30        # Mode 1 online ping (s)
-MODE2_ONLINE_DURATION = 120      # Mode 2 online duration (s)
+MODE2_ONLINE_DURATION = 300     # Mode 2 online duration (s)
 REACTION_GAP = 1
 VIEW_GAP = 1
 HEALTH_CHECK_INTERVAL = 60
